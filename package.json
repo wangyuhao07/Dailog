@@ -1,0 +1,71 @@
+{
+  "name": "dailog",
+  "private": true,
+  "version": "1.0.1",
+  "description": "A local-first desktop daily log and AI report tool.",
+  "author": "Dailog contributors",
+  "license": "MIT",
+  "repository": "https://github.com/wangyuhao07/Dailog.git",
+  "bugs": {
+    "url": "https://github.com/wangyuhao07/Dailog/issues"
+  },
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "node scripts/start-dev.mjs",
+    "dev:renderer": "vite --port 5178 --strictPort",
+    "dev:electron": "wait-on tcp:5178 && electron .",
+    "build": "vite build",
+    "dist": "pnpm build && electron-builder --win zip --x64",
+    "dist:dir": "pnpm build && electron-builder --win --x64 --dir",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.6.0",
+    "concurrently": "^9.2.1",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.15.3",
+    "vite": "^7.1.5",
+    "wait-on": "^8.0.5"
+  },
+  "build": {
+    "appId": "com.dailog.app",
+    "productName": "Dailog",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "."
+    },
+    "electronLanguages": [
+      "en-US",
+      "zh-CN"
+    ],
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "logo.png"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "logo.png",
+      "artifactName": "Dailog-${version}-Windows-${arch}.${ext}"
+    }
+  }
+}

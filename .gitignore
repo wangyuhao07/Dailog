@@ -1,0 +1,15 @@
+node_modules
+dist
+*.log
+.env
+.env.*
+!example.env
+electron/dist
+.runtime
+release
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+dailog-*.json
