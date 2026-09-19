@@ -1,7 +1,7 @@
 {
   "name": "dailog",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.1.2",
   "description": "A local-first desktop daily log and AI report tool.",
   "author": "Dailog contributors",
   "license": "MIT",
@@ -65,7 +65,7 @@
         }
       ],
       "icon": "logo.png",
-      "artifactName": "Dailog-${version}-Windows-${arch}.${ext}"
+      "artifactName": "Dailog-1.1.2-Windows-${arch}.${ext}"
     }
   }
 }

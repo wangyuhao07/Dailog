@@ -1,20 +1,13 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createEmptyAppState, normalizeAppState } from './core/appState.js';
 
 const STATE_KEY = 'main';
 const DB_FILE_NAME = 'dailog.db';
 
 function nowIso() {
   return new Date().toISOString();
-}
-
-function emptyState() {
-  return {
-    months: [],
-    settings: null,
-    aiDebugEntries: [],
-  };
 }
 
 export function createStorage(userDataPath) {
@@ -45,6 +38,9 @@ export function createStorage(userDataPath) {
 
   return {
     dbPath,
+    getDataVersion() {
+      return Number(db.pragma('data_version', { simple: true }) || 0);
+    },
     readState() {
       const row = readStatement.get(STATE_KEY);
       if (!row?.value) {
@@ -53,24 +49,16 @@ export function createStorage(userDataPath) {
 
       try {
         const parsed = JSON.parse(row.value);
-        return {
-          months: Array.isArray(parsed?.months) ? parsed.months : [],
-          settings: parsed?.settings ?? null,
-          aiDebugEntries: Array.isArray(parsed?.aiDebugEntries) ? parsed.aiDebugEntries.slice(0, 8) : [],
-        };
+        return normalizeAppState(parsed);
       } catch (error) {
         const backupPath = path.join(userDataPath, `dailog-state-corrupt-${Date.now()}.json`);
         fs.writeFileSync(backupPath, row.value, 'utf8');
         console.error('[Dailog] 本地状态数据损坏，已备份并使用空状态启动。', error);
-        return emptyState();
+        return createEmptyAppState();
       }
     },
     writeState(nextState) {
-      const safeState = {
-        months: Array.isArray(nextState?.months) ? nextState.months : [],
-        settings: nextState?.settings ?? null,
-        aiDebugEntries: Array.isArray(nextState?.aiDebugEntries) ? nextState.aiDebugEntries.slice(0, 8) : [],
-      };
+      const safeState = normalizeAppState(nextState);
 
       writeStatement.run(STATE_KEY, JSON.stringify(safeState), nowIso());
       return safeState;

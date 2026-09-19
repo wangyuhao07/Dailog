@@ -21,3 +21,8 @@
 - JSON record export/import and full data export/import.
 - System tray actions for opening the floating window and management console.
 - MIT open-source license and project documentation.
+## v1.1.2
+
+- 新增本地 stdio MCP：支持查询、写入事项、补充进展以及生成单日日报和区间汇报。
+- MCP 生成结果复用应用的模型配置、日报模板和复杂度设置，并自动同步到界面。
+- 完善 SQLite 跨进程状态同步和 MCP 运行状态校验。

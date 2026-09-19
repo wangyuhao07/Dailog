@@ -1,11 +1,11 @@
 # Dailog
 
 [![license MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![release v1.0.1](https://img.shields.io/badge/release-v1.0.1-blue)](https://github.com/wangyuhao07/Dailog/releases/tag/v1.0.1)
+[![release v1.1.2](https://img.shields.io/badge/release-v1.1.2-blue)](https://github.com/wangyuhao07/Dailog/releases/tag/v1.1.2)
 
 Dailog 是一个本地优先的桌面日报工具。它把日常事项记录、状态维护、单日日报和区间汇报集中在一个 Electron 应用中，适合需要持续记录工作进展的个人用户。
 
-当前版本：`v1.0.1`
+当前版本：`v1.1.2`
 
 ## 功能
 
@@ -19,6 +19,7 @@ Dailog 是一个本地优先的桌面日报工具。它把日常事项记录、�
 - 本地持久化：使用 SQLite 保存应用状态，不需要额外安装数据库服务。
 - 数据备份：支持记录导出、全部数据导出、数据导入和全量导入。
 - 系统托盘：通过托盘图标打开悬浮窗或控制台。
+- 本地 MCP：通过 stdio 供本地 Agent 查询、写入事项并生成日报和区间汇报。
 
 ## 技术栈
 

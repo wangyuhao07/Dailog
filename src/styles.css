@@ -308,6 +308,7 @@ p {
 
 .detail-task,
 .detail-edit-row {
+  display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
 }
@@ -338,8 +339,41 @@ p {
 }
 
 .detail-task p {
-  white-space: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-task.is-expanded p {
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
   overflow-wrap: anywhere;
+}
+
+.detail-task-content,
+.detail-edit-content {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.detail-subtask-list {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0 0 0 18px;
+  border-left: 2px solid #e7e7e7;
+  color: #555555;
+  font-size: 12px;
+  line-height: 1.5;
+  list-style: none;
+}
+
+.detail-subtask-list li::before {
+  content: "- ";
+  color: var(--muted);
 }
 
 .task-more {
@@ -396,6 +430,7 @@ p {
 .setting-field input,
 .setting-field textarea,
 .detail-edit-row input,
+.detail-edit-row textarea,
 .report-edit {
   width: 100%;
   min-height: 30px;
@@ -984,6 +1019,30 @@ p {
   color: #2f56a8;
 }
 
+.mcp-config-box {
+  max-height: 168px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7f7f7;
+  scrollbar-width: none;
+}
+
+.mcp-config-box::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.mcp-config-box pre {
+  margin: 0;
+  color: #333333;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
 .model-dialog-message {
   display: grid;
   gap: 6px;
@@ -1305,12 +1364,97 @@ p {
 
 .detail-task {
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
+  align-items: start;
   gap: 8px;
+  cursor: pointer;
 }
 
 .detail-edit-row {
   grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.detail-task.is-expanded,
+.detail-edit-row.is-expanded {
+  border-color: var(--line-strong);
+  background: #fafafa;
+}
+
+.detail-edit-row textarea {
+  min-height: 74px;
+  max-height: 180px;
+  line-height: 1.55;
+  overflow-y: auto;
+  resize: vertical;
+}
+
+.detail-subtask-editor {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.detail-subtask-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.detail-subtask-editor button,
+.detail-subtask-edit-row button {
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--soft);
+  color: #555555;
+  font-size: 12px;
+}
+
+.detail-subtask-edit-list {
+  display: grid;
+  gap: 7px;
+}
+
+.detail-subtask-edit-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.detail-subtask-edit-row.is-active {
+  align-items: start;
+}
+
+.detail-subtask-edit-row > span {
+  height: 28px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.detail-subtask-edit-row textarea {
+  min-height: 44px;
+  max-height: 120px;
+}
+
+.detail-subtask-compact {
+  min-width: 0;
+  width: 100%;
+  justify-self: stretch;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .report-dot.yellow {

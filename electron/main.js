@@ -3,11 +3,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { askModelQuestion, generateDailyReport, testModelConnection } from './aiClient.js';
+import { createAppStateService } from './core/appStateService.js';
+import { startMainRuntimeHeartbeat } from './core/runtimeGuard.js';
+import { runMcpServer } from './mcpServer.js';
 import { createStorage } from './storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isDev = !app.isPackaged;
+const isMcpMode = process.env.DAILOG_MCP === '1' || process.argv.includes('--mcp') || app.commandLine.hasSwitch('mcp');
 const devUrl = process.env.DAILOG_DEV_URL || 'http://localhost:5178';
 const logoPath = path.join(__dirname, '..', 'logo.png');
 const feedbackUrl = 'https://github.com/wangyuhao07/Dailog';
@@ -15,6 +19,9 @@ const feedbackUrl = 'https://github.com/wangyuhao07/Dailog';
 app.setName('Dailog');
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu-sandbox');
+if (process.env.DAILOG_USER_DATA_DIR) {
+  app.setPath('userData', process.env.DAILOG_USER_DATA_DIR);
+}
 const floatingSize = { width: 416, height: 760 };
 let floatingWindow = null;
 let managerWindow = null;
@@ -22,13 +29,91 @@ let tray = null;
 let isQuitting = false;
 let resizeTimer = null;
 let resizeState = null;
-let storage = null;
-let sharedAppState = null;
+let appStateService = null;
+let stateStorage = null;
+let stateSyncTimer = null;
+let lastStorageDataVersion = null;
+let stopRuntimeHeartbeat = null;
 const maxImportFileSize = 10 * 1024 * 1024;
+const supportsAutoLaunch = process.platform === 'win32' || process.platform === 'darwin';
 
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
-if (!gotSingleInstanceLock) {
-  app.quit();
+function broadcastState(nextState) {
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.webContents.isDestroyed()) {
+      win.webContents.send('state:changed', nextState);
+    }
+  });
+}
+
+function startExternalStateSync() {
+  if (!stateStorage?.getDataVersion || stateSyncTimer) {
+    return;
+  }
+
+  lastStorageDataVersion = stateStorage.getDataVersion();
+  stateSyncTimer = setInterval(() => {
+    if (!stateStorage || !appStateService) {
+      return;
+    }
+
+    const nextDataVersion = stateStorage.getDataVersion();
+    if (nextDataVersion === lastStorageDataVersion) {
+      return;
+    }
+
+    lastStorageDataVersion = nextDataVersion;
+    const nextState = appStateService.getState({ refresh: true });
+    broadcastState(nextState);
+  }, 750);
+}
+
+function stopExternalStateSync() {
+  if (stateSyncTimer) {
+    clearInterval(stateSyncTimer);
+    stateSyncTimer = null;
+  }
+}
+
+if (isMcpMode) {
+  runMcpServer({ app, version: app.getVersion() }).catch((error) => {
+    process.stderr.write(`Dailog MCP 启动失败：${error?.message || '未知错误'}\n`);
+    app.exit(1);
+  });
+} else {
+  const gotSingleInstanceLock = app.requestSingleInstanceLock();
+  if (!gotSingleInstanceLock) {
+    app.quit();
+  }
+}
+
+function buildLoginItemSettings(openAtLogin) {
+  const settings = {
+    path: process.execPath,
+    args: isDev ? [app.getAppPath(), '--autostart'] : ['--autostart'],
+  };
+
+  if (typeof openAtLogin === 'boolean') {
+    settings.openAtLogin = openAtLogin;
+  }
+
+  return settings;
+}
+
+function getAutoLaunchEnabled() {
+  if (!supportsAutoLaunch) {
+    return false;
+  }
+
+  return Boolean(app.getLoginItemSettings(buildLoginItemSettings()).openAtLogin);
+}
+
+function setAutoLaunchEnabled(enabled) {
+  if (!supportsAutoLaunch) {
+    return false;
+  }
+
+  app.setLoginItemSettings(buildLoginItemSettings(Boolean(enabled)));
+  return getAutoLaunchEnabled();
 }
 
 function stopFloatingResize() {
@@ -68,6 +153,7 @@ function createFloatingWindow() {
     transparent: true,
     resizable: true,
     alwaysOnTop: false,
+    skipTaskbar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -144,24 +230,11 @@ ipcMain.handle('floating:end-resize', () => {
 });
 
 ipcMain.handle('state:get', () => {
-  if (!storage) {
-    return sharedAppState;
-  }
-
-  sharedAppState = storage.readState();
-  return sharedAppState;
+  return appStateService?.getState() ?? null;
 });
 
 ipcMain.handle('state:set', (event, nextState) => {
-  sharedAppState = storage ? storage.writeState(nextState) : nextState;
-
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (win.webContents.id !== event.sender.id && !win.webContents.isDestroyed()) {
-      win.webContents.send('state:changed', sharedAppState);
-    }
-  });
-
-  return sharedAppState;
+  return appStateService?.setState(nextState, { sourceWebContentsId: event.sender.id }) ?? null;
 });
 
 ipcMain.handle('shell:open-external', (_event, url) => {
@@ -172,6 +245,48 @@ ipcMain.handle('shell:open-external', (_event, url) => {
   shell.openExternal(url);
   return true;
 });
+
+ipcMain.handle('app:get-auto-launch', () => ({
+  ok: true,
+  supported: supportsAutoLaunch,
+  enabled: getAutoLaunchEnabled(),
+}));
+
+ipcMain.handle('app:set-auto-launch', (_event, enabled) => {
+  try {
+    return {
+      ok: true,
+      supported: supportsAutoLaunch,
+      enabled: setAutoLaunchEnabled(enabled),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      supported: supportsAutoLaunch,
+      enabled: getAutoLaunchEnabled(),
+      message: error?.message || 'Failed to update auto launch setting.',
+    };
+  }
+});
+
+ipcMain.handle('app:get-mcp-client-config', () => ({
+  ok: true,
+  config: {
+    mcpServers: {
+      dailog: {
+        command: isDev ? path.join(app.getAppPath(), 'node_modules', 'electron', 'dist', 'electron.exe') : process.execPath,
+        args: [
+          isDev
+            ? path.join(app.getAppPath(), 'electron', 'mcpNodeServer.js')
+            : path.join(process.resourcesPath, 'app.asar', 'electron', 'mcpNodeServer.js'),
+        ],
+        env: {
+          ELECTRON_RUN_AS_NODE: '1',
+        },
+      },
+    },
+  },
+}));
 
 ipcMain.handle('ai:test-model', (_event, config) => testModelConnection(config));
 ipcMain.handle('ai:ask-model', (_event, config, question) => askModelQuestion(config, question));
@@ -287,38 +402,55 @@ function createTray() {
   tray.on('double-click', () => createFloatingWindow());
 }
 
-app.on('second-instance', () => {
-  showFloatingWindow();
-  if (managerWindow) {
-    managerWindow.show();
-    managerWindow.focus();
-  }
-});
-
-app.whenReady().then(() => {
-  Menu.setApplicationMenu(null);
-  storage = createStorage(app.getPath('userData'));
-  sharedAppState = storage.readState();
-  createTray();
-  showFloatingWindow();
-
-  app.on('activate', () => {
-    if (floatingWindow) {
-      floatingWindow.show();
-      floatingWindow.focus();
-      return;
-    }
-
+if (!isMcpMode) {
+  app.on('second-instance', () => {
     showFloatingWindow();
+    if (managerWindow) {
+      managerWindow.show();
+      managerWindow.focus();
+    }
   });
-});
 
-app.on('window-all-closed', () => {
-  if (isQuitting && process.platform !== 'darwin') {
-    app.quit();
-  }
-});
+  app.whenReady().then(() => {
+    Menu.setApplicationMenu(null);
+    stateStorage = createStorage(app.getPath('userData'));
+    appStateService = createAppStateService({
+      storage: stateStorage,
+      onChange(nextState, options = {}) {
+        lastStorageDataVersion = stateStorage?.getDataVersion?.() ?? lastStorageDataVersion;
+        BrowserWindow.getAllWindows().forEach((win) => {
+          if (win.webContents.id !== options.sourceWebContentsId && !win.webContents.isDestroyed()) {
+            win.webContents.send('state:changed', nextState);
+          }
+        });
+      },
+    });
+    startExternalStateSync();
+    stopRuntimeHeartbeat = startMainRuntimeHeartbeat(app.getPath('userData'));
+    createTray();
+    showFloatingWindow();
 
-app.on('before-quit', () => {
-  storage?.close();
-});
+    app.on('activate', () => {
+      if (floatingWindow) {
+        floatingWindow.show();
+        floatingWindow.focus();
+        return;
+      }
+
+      showFloatingWindow();
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    if (isQuitting && process.platform !== 'darwin') {
+      app.quit();
+    }
+  });
+
+  app.on('before-quit', () => {
+    stopExternalStateSync();
+    stopRuntimeHeartbeat?.();
+    appStateService?.close();
+    stateStorage = null;
+  });
+}

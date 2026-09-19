@@ -24,6 +24,8 @@ const MAX_VISIBLE_DATE_ITEMS = 3;
 const DEFAULT_REPORT_TEXT = '这里显示当天最新一版日报。后续接入 AI 后，多次生成只保留最新内容。';
 const DEFAULT_SETTINGS = {
   opacity: 88,
+  autoLaunch: false,
+  mcpEnabled: false,
   reportTime: '18:30',
   endpoint: 'https://api.openai.com/v1',
   apiKey: '',
@@ -35,7 +37,7 @@ const DEFAULT_SETTINGS = {
   aiDebugPrompt: '你是什么模型？',
 };
 const GITHUB_URL = 'https://github.com/wangyuhao07/Dailog';
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.1.2';
 const APP_AUTHOR = '王肉肉的白日梦';
 const COMPLEXITY_OPTIONS = ['简单', '适中', '较长'];
 const EXPORT_SCHEMA_VERSION = 1;
@@ -50,6 +52,8 @@ function normalizeSettings(settings) {
   return {
     ...nextSettings,
     opacity: Math.max(30, Math.min(100, Number(nextSettings.opacity) || DEFAULT_SETTINGS.opacity)),
+    autoLaunch: Boolean(nextSettings.autoLaunch),
+    mcpEnabled: Boolean(nextSettings.mcpEnabled),
     apiKey: typeof nextSettings.apiKey === 'string' ? nextSettings.apiKey : '',
     complexity: nextSettings.complexity === '复杂' ? '较长' : nextSettings.complexity,
     showApiKey: Boolean(nextSettings.showApiKey),
@@ -62,6 +66,49 @@ function normalizeAiDebugEntries(entries) {
   return Array.isArray(entries) ? entries.filter(Boolean).slice(0, 8) : [];
 }
 
+function normalizeSubtasks(subtasks) {
+  return (Array.isArray(subtasks) ? subtasks : [])
+    .map((subtask, index) => {
+      const source = typeof subtask === 'string' ? { text: subtask } : subtask;
+      const text = String(source?.text ?? '').trim();
+      if (!text) {
+        return null;
+      }
+
+      return {
+        id: String(source?.id || `subtask-${index}`),
+        text,
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeItem(item, index = 0) {
+  return {
+    ...item,
+    id: String(item?.id || `item-${index}`),
+    text: String(item?.text ?? ''),
+    status: item?.status || '进行中',
+    subtasks: normalizeSubtasks(item?.subtasks),
+  };
+}
+
+function normalizeDay(day) {
+  return {
+    ...day,
+    items: (Array.isArray(day?.items) ? day.items : []).map((item, index) => normalizeItem(item, index)),
+  };
+}
+
+function normalizeMonthsForApp(months) {
+  return sortMonths(months).map((month) => ({
+    ...month,
+    dayCards: (month.dayCards ?? [])
+      .map(normalizeDay)
+      .sort((left, right) => left.date.localeCompare(right.date)),
+  }));
+}
+
 function buildExportPayload(exportType, { months, settings }) {
   const payload = {
     app: EXPORT_APP_NAME,
@@ -69,7 +116,7 @@ function buildExportPayload(exportType, { months, settings }) {
     exportType,
     exportedAt: new Date().toISOString(),
     data: {
-      months: sortMonths(months),
+      months: normalizeMonthsForApp(months),
     },
   };
 
@@ -153,7 +200,7 @@ function readImportPayload(payload, importType) {
   }
 
   const nextState = {
-    months: sortMonths(data.months),
+    months: normalizeMonthsForApp(data.months),
     settings: null,
   };
 
@@ -199,7 +246,6 @@ async function readResponsePayload(response) {
     return { text, json: null };
   }
 }
-
 function localizeProviderError(detail) {
   const raw = String(detail || '').trim();
   if (!raw) {
@@ -273,6 +319,50 @@ function responseStatusHint(status) {
   return '接口返回了错误状态';
 }
 
+function extractAiChoiceContent(choice) {
+  const content = choice?.message?.content ?? choice?.text;
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') {
+          return part;
+        }
+        if (typeof part?.text === 'string') {
+          return part.text;
+        }
+        if (typeof part?.content === 'string') {
+          return part.content;
+        }
+        return '';
+      })
+      .join('');
+  }
+
+  return null;
+}
+
+function emptyAiContentMessage(choice) {
+  const finishReason = choice?.finish_reason ? `（finish_reason：${choice.finish_reason}）` : '';
+  return `模型返回了空内容${finishReason}。请检查模型名称是否支持 Chat Completions，或在“对话测试”里用同一配置发送一条普通问题。`;
+}
+
+function withProviderOptions(body, { endpoint, model }) {
+  const isDeepSeek = /(^|\.)deepseek\.com/i.test(endpoint) || /^deepseek-/i.test(model);
+  if (!isDeepSeek) {
+    return body;
+  }
+
+  return {
+    ...body,
+    thinking: { type: 'disabled' },
+    reasoning_effort: 'none',
+  };
+}
+
 async function testModelInBrowser(settings) {
   const endpoint = settings.endpoint.trim();
   const apiKey = settings.apiKey.trim();
@@ -305,24 +395,33 @@ async function testModelInBrowser(settings) {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: '请只回复 OK，用于测试模型连通性。' }],
-        max_tokens: 8,
-        temperature: 0,
-        stream: false,
-      }),
+      body: JSON.stringify(
+        withProviderOptions(
+          {
+            model,
+            messages: [{ role: 'user', content: '请只回复 OK，用于测试模型连通性。' }],
+            max_tokens: 16,
+            temperature: 0,
+            stream: false,
+          },
+          { endpoint, model },
+        ),
+      ),
       signal: controller.signal,
     });
 
     const payload = await readResponsePayload(response);
     if (response.ok) {
-      const content = payload.json?.choices?.[0]?.message?.content ?? payload.json?.choices?.[0]?.text;
+      const firstChoice = payload.json?.choices?.[0];
+      const content = extractAiChoiceContent(firstChoice);
       if (typeof content !== 'string') {
         return {
           ok: false,
           message: '接口已连接，但返回内容不是 OpenAI Chat Completions 兼容格式，请检查接口地址是否指向 /chat/completions。',
         };
+      }
+      if (!content.trim()) {
+        return { ok: false, message: emptyAiContentMessage(firstChoice) };
       }
 
       return { ok: true, message: `连接成功，模型 ${model} 已返回响应。` };
@@ -380,27 +479,37 @@ async function askModelInBrowser(settings, question) {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 500,
-        temperature: 0.2,
-        stream: false,
-      }),
+      body: JSON.stringify(
+        withProviderOptions(
+          {
+            model,
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: 500,
+            temperature: 0.2,
+            stream: false,
+          },
+          { endpoint, model },
+        ),
+      ),
       signal: controller.signal,
     });
 
     const payload = await readResponsePayload(response);
     if (response.ok) {
-      const content = payload.json?.choices?.[0]?.message?.content ?? payload.json?.choices?.[0]?.text;
+      const firstChoice = payload.json?.choices?.[0];
+      const content = extractAiChoiceContent(firstChoice);
       if (typeof content !== 'string') {
         return {
           ok: false,
           message: '接口已连接，但返回内容不是 OpenAI Chat Completions 兼容格式，请检查接口地址是否指向 /chat/completions。',
         };
       }
+      const trimmedContent = content.trim();
+      if (!trimmedContent) {
+        return { ok: false, message: emptyAiContentMessage(firstChoice) };
+      }
 
-      return { ok: true, message: content.trim() || '模型返回了空内容。' };
+      return { ok: true, message: trimmedContent };
     }
 
     const detail = payload.json?.error?.message || payload.json?.message || payload.text.slice(0, 180);
@@ -493,6 +602,9 @@ function getAutoReportAttemptKey(day, settings) {
     .filter((item) => String(item?.text || '').trim())
     .map((item) => `${item.status || '进行中'}:${String(item.text || '').trim()}`)
     .join('|');
+  const subtasksKey = (day.items ?? [])
+    .flatMap((item) => normalizeSubtasks(item.subtasks).map((subtask) => subtask.text))
+    .join('|');
   const settingsKey = [
     settings?.endpoint,
     settings?.apiKey,
@@ -503,7 +615,7 @@ function getAutoReportAttemptKey(day, settings) {
     .map((value) => String(value || '').trim())
     .join('|');
 
-  return `${day.date}::${settingsKey}::${itemsKey}`;
+  return `${day.date}::${settingsKey}::${itemsKey}::${subtasksKey}`;
 }
 
 function findDay(months, date) {
@@ -609,7 +721,7 @@ function removeRangeReport(months, reportId) {
 }
 
 function cloneItems(items) {
-  return items.map((item) => ({ ...item }));
+  return items.map((item, index) => normalizeItem(item, index));
 }
 
 function getMonthKeyFromDate(date) {
@@ -820,6 +932,18 @@ const STATUS_BUTTONS = [
     icon: CloseIcon,
   },
 ];
+const STATUS_PRIORITY = new Map(STATUS_BUTTONS.map((status, index) => [status.value, index]));
+
+function sortItemsByStatus(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const leftRank = STATUS_PRIORITY.get(left.item?.status) ?? STATUS_PRIORITY.size;
+      const rightRank = STATUS_PRIORITY.get(right.item?.status) ?? STATUS_PRIORITY.size;
+      return leftRank - rightRank || left.index - right.index;
+    })
+    .map(({ item }) => item);
+}
 
 function RunningIcon() {
   return (
@@ -924,12 +1048,42 @@ function TextButton({ children, onClick, tone = 'light' }) {
   );
 }
 
+function resizeTextareaToContent(textarea) {
+  if (!textarea) {
+    return;
+  }
+
+  textarea.style.height = 'auto';
+  textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
+}
+
+function AutoResizeTextarea({ value, autoFocus = false, onChange, ...props }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    resizeTextareaToContent(ref.current);
+  }, [value]);
+
+  useEffect(() => {
+    if (!autoFocus || !ref.current) {
+      return;
+    }
+
+    ref.current.focus();
+    ref.current.setSelectionRange(ref.current.value.length, ref.current.value.length);
+  }, [autoFocus]);
+
+  return <textarea ref={ref} value={value} onChange={onChange} {...props} />;
+}
+
 export default function App() {
   const [screen, setScreen] = useState(viewName);
   const [months, setMonths] = useState(() => cloneMonths());
   const [currentMonthKey, setCurrentMonthKey] = useState(() => getTodayIso().slice(0, 7));
   const [composer, setComposer] = useState(null);
   const [detail, setDetail] = useState(null);
+  const [expandedDetailItemId, setExpandedDetailItemId] = useState(null);
+  const [activeDetailSubtaskId, setActiveDetailSubtaskId] = useState(null);
   const [isResizing, setIsResizing] = useState(false);
   const [pendingRevealDate, setPendingRevealDate] = useState(null);
   const [cardMenu, setCardMenu] = useState(null);
@@ -938,6 +1092,9 @@ export default function App() {
   const [rangeMenu, setRangeMenu] = useState(null);
   const [rangeReportMenu, setRangeReportMenu] = useState(null);
   const [modelTest, setModelTest] = useState({ status: 'idle', message: '' });
+  const [autoLaunchStatus, setAutoLaunchStatus] = useState({ status: 'idle', message: '' });
+  const [mcpConfig, setMcpConfig] = useState(null);
+  const [mcpStatus, setMcpStatus] = useState({ status: 'idle', message: '' });
   const [dataTransfer, setDataTransfer] = useState({ status: 'idle', message: '' });
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [dialogTest, setDialogTest] = useState({ status: 'idle', message: '', request: '' });
@@ -1007,7 +1164,7 @@ export default function App() {
       if (nextState?.months || nextState?.settings || Array.isArray(nextState?.aiDebugEntries)) {
         isApplyingRemoteStateRef.current = true;
         if (nextState.months) {
-          setMonths(sortMonths(nextState.months));
+          setMonths(normalizeMonthsForApp(nextState.months));
         }
         if (nextState.settings) {
           setSettings(normalizeSettings(nextState.settings));
@@ -1027,7 +1184,7 @@ export default function App() {
 
       isApplyingRemoteStateRef.current = true;
       if (nextState.months) {
-        setMonths(sortMonths(nextState.months));
+        setMonths(normalizeMonthsForApp(nextState.months));
       }
       if (nextState.settings) {
         setSettings(normalizeSettings(nextState.settings));
@@ -1055,6 +1212,49 @@ export default function App() {
 
     window.dailog.setAppState({ months, settings, aiDebugEntries });
   }, [aiDebugEntries, hasStateBridge, isStateReady, months, settings]);
+
+  useEffect(() => {
+    if (!hasStateBridge || !isStateReady || !window.dailog?.getAutoLaunch || !window.dailog?.setAutoLaunch) {
+      return undefined;
+    }
+
+    let disposed = false;
+    const desired = Boolean(settings.autoLaunch);
+
+    window.dailog
+      .getAutoLaunch()
+      .then((result) => {
+        if (disposed || !result?.ok || Boolean(result.enabled) === desired) {
+          return null;
+        }
+
+        return window.dailog.setAutoLaunch(desired);
+      })
+      .then((result) => {
+        if (disposed || !result || result.ok) {
+          return;
+        }
+
+        setAutoLaunchStatus({
+          status: 'error',
+          message: result.message || '开机自启同步失败，请重新设置。',
+        });
+      })
+      .catch((error) => {
+        if (disposed) {
+          return;
+        }
+
+        setAutoLaunchStatus({
+          status: 'error',
+          message: `开机自启同步失败：${error?.message || '无法访问系统设置。'}`,
+        });
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [hasStateBridge, isStateReady, settings.autoLaunch]);
 
   useEffect(() => {
     if (screen !== 'floating') {
@@ -1261,6 +1461,30 @@ export default function App() {
     setDialogTest((prev) => (prev.status === 'idle' ? prev : { status: 'idle', message: '' }));
   }, [settings.endpoint, settings.apiKey, settings.model]);
 
+  useEffect(() => {
+    if (screen !== 'settings' || !window.dailog?.getMcpClientConfig) {
+      return undefined;
+    }
+
+    let disposed = false;
+    window.dailog
+      .getMcpClientConfig()
+      .then((result) => {
+        if (!disposed && result?.ok) {
+          setMcpConfig(result.config);
+        }
+      })
+      .catch(() => {
+        if (!disposed) {
+          setMcpConfig(null);
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [screen]);
+
   const showScreen = (nextScreen) => {
     window.location.hash = `/${nextScreen}`;
     setScreen(nextScreen);
@@ -1270,6 +1494,93 @@ export default function App() {
     setSettings((prev) => ({ ...prev, ...patch }));
     setModelTest({ status: 'idle', message: '' });
     setDialogTest({ status: 'idle', message: '', request: '' });
+  };
+
+  const updateAutoLaunch = async (enabled) => {
+    setAutoLaunchStatus({
+      status: 'testing',
+      message: enabled ? '正在开启开机自启...' : '正在关闭开机自启...',
+    });
+
+    if (!window.dailog?.setAutoLaunch) {
+      setAutoLaunchStatus({
+        status: 'error',
+        message: '当前环境不支持开机自启设置。',
+      });
+      return;
+    }
+
+    try {
+      const result = await window.dailog.setAutoLaunch(enabled);
+      if (!result?.ok) {
+        setAutoLaunchStatus({
+          status: 'error',
+          message: result?.message || '开机自启设置失败。',
+        });
+        return;
+      }
+
+      if (result.supported === false) {
+        setAutoLaunchStatus({
+          status: 'error',
+          message: '当前系统暂不支持开机自启设置。',
+        });
+        return;
+      }
+
+      setSettings((prev) => ({ ...prev, autoLaunch: Boolean(result.enabled) }));
+      setAutoLaunchStatus({
+        status: 'success',
+        message: result.enabled ? '已开启开机自启。' : '已关闭开机自启。',
+      });
+    } catch (error) {
+      setAutoLaunchStatus({
+        status: 'error',
+        message: `开机自启设置失败：${error?.message || '无法访问系统设置。'}`,
+      });
+    }
+  };
+
+  const getMcpConfigText = () => {
+    const fallbackConfig = {
+      mcpServers: {
+        dailog: {
+          command: '<Dailog安装目录>\\node_modules\\electron\\dist\\electron.exe',
+          args: ['<Dailog安装目录>\\electron\\mcpNodeServer.js'],
+          env: {
+            ELECTRON_RUN_AS_NODE: '1',
+          },
+        },
+      },
+    };
+
+    return JSON.stringify(mcpConfig ?? fallbackConfig, null, 2);
+  };
+
+  const copyMcpConfig = async () => {
+    const text = getMcpConfigText();
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        textarea.remove();
+      }
+
+      setMcpStatus({ status: 'success', message: 'MCP 客户端配置已复制。' });
+    } catch (error) {
+      setMcpStatus({
+        status: 'error',
+        message: `复制失败：${error?.message || '请手动复制配置内容。'}`,
+      });
+    }
   };
 
   const appendAiDebugEntry = (entry) => {
@@ -1362,7 +1673,7 @@ export default function App() {
     const sourceSettings = options.settings ?? settings;
     const found = findDay(sourceMonths, date);
     const day = found?.day ?? null;
-    const cleanItems = day?.items?.filter((item) => String(item?.text || '').trim()) ?? [];
+    const cleanItems = sortItemsByStatus(day?.items?.filter((item) => String(item?.text || '').trim()) ?? []);
 
     if (!day || cleanItems.length === 0) {
       const message = '日报生成失败：当天没有事项记录。';
@@ -1802,6 +2113,7 @@ export default function App() {
     const nextItem = {
       id: `item-${Date.now()}`,
       text: composer.text.trim(),
+      subtasks: [],
       status: '进行中',
     };
 
@@ -1844,6 +2156,8 @@ export default function App() {
 
   const openDetail = (date) => {
     const found = findDay(months, date);
+    setExpandedDetailItemId(null);
+    setActiveDetailSubtaskId(null);
     setDetail({
       kind: 'day',
       date,
@@ -1852,6 +2166,12 @@ export default function App() {
       draftReportText: getReportText(found?.day),
       isNew: !found,
     });
+  };
+
+  const closeDetail = () => {
+    setExpandedDetailItemId(null);
+    setActiveDetailSubtaskId(null);
+    setDetail(null);
   };
 
   const saveDetail = () => {
@@ -1882,13 +2202,21 @@ export default function App() {
         }),
       );
 
+      setExpandedDetailItemId(null);
+      setActiveDetailSubtaskId(null);
       setDetail((prev) => (prev?.kind === 'range' ? null : prev));
       return;
     }
 
-    const cleanItems = detail.draftItems
-      .map((item) => ({ ...item, text: item.text.trim() }))
-      .filter((item) => item.text);
+    const cleanItems = sortItemsByStatus(
+      detail.draftItems
+        .map((item, index) => ({
+          ...normalizeItem(item, index),
+          text: item.text.trim(),
+          subtasks: normalizeSubtasks(item.subtasks),
+        }))
+        .filter((item) => item.text),
+    );
     const cleanReportText = (detail.draftReportText ?? '').trim();
 
     setMonths((prev) => {
@@ -1905,13 +2233,66 @@ export default function App() {
       });
     });
 
-    setDetail(null);
+    closeDetail();
   };
 
   const updateDetailItem = (itemId, patch) => {
     setDetail((prev) => ({
       ...prev,
       draftItems: prev.draftItems.map((item) => (item.id === itemId ? { ...item, ...patch } : item)),
+    }));
+  };
+
+  const addDetailSubtask = (itemId) => {
+    const subtaskId = `subtask-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setDetail((prev) => ({
+      ...prev,
+      draftItems: prev.draftItems.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              subtasks: [
+                ...(Array.isArray(item.subtasks) ? item.subtasks : []),
+                { id: subtaskId, text: '' },
+              ],
+            }
+          : item,
+      ),
+    }));
+    setActiveDetailSubtaskId(subtaskId);
+  };
+
+  const updateDetailSubtask = (itemId, subtaskId, text) => {
+    setDetail((prev) => ({
+      ...prev,
+      draftItems: prev.draftItems.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              subtasks: (Array.isArray(item.subtasks) ? item.subtasks : []).map((subtask) =>
+                subtask.id === subtaskId ? { ...subtask, text } : subtask,
+              ),
+            }
+          : item,
+      ),
+    }));
+  };
+
+  const removeDetailSubtask = (itemId, subtaskId) => {
+    if (activeDetailSubtaskId === subtaskId) {
+      setActiveDetailSubtaskId(null);
+    }
+
+    setDetail((prev) => ({
+      ...prev,
+      draftItems: prev.draftItems.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              subtasks: (Array.isArray(item.subtasks) ? item.subtasks : []).filter((subtask) => subtask.id !== subtaskId),
+            }
+          : item,
+      ),
     }));
   };
 
@@ -2178,7 +2559,7 @@ export default function App() {
 
                       <div className="daily-scroll">
                         <div className="task-list">
-                          {day.items.map((item, index) => (
+                          {sortItemsByStatus(day.items).map((item, index) => (
                             <div className="task-row" key={item.id}>
                               <span className="task-index">{index + 1}</span>
                               <span className="task-text" title={item.text}>{item.text}</span>
@@ -2292,7 +2673,7 @@ export default function App() {
                     </div>
                     {cell.day ? (
                       <div className="date-cell-items">
-                        {visibleDateItems(cell.day.items).map((item, index) =>
+                        {visibleDateItems(sortItemsByStatus(cell.day.items)).map((item, index) =>
                           item ? (
                             <div className="date-cell-item" key={item.id}>
                               <span className="date-cell-item-index">{index + 1}.</span>
@@ -2411,6 +2792,61 @@ export default function App() {
               />
             </label>
 
+            <section className="setting-field">
+              <span>启动设置</span>
+              <small>开启后，Dailog 会在用户登录 Windows 后自动启动。</small>
+              <div className="setting-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings.autoLaunch}
+                  disabled={autoLaunchStatus.status === 'testing'}
+                  onChange={(event) => updateAutoLaunch(event.target.checked)}
+                />
+                <span>开机自动启动 Dailog</span>
+              </div>
+              {autoLaunchStatus.message ? (
+                <div className={`model-test-message ${autoLaunchStatus.status}`} role="status">
+                  {autoLaunchStatus.message}
+                </div>
+              ) : null}
+            </section>
+
+            <section className="setting-field setting-group">
+              <div className="setting-field-heading">
+                <div>
+                  <span>本地 MCP</span>
+                  <small>开启后，可信 AI 客户端可以通过本地 stdio MCP 调用 Dailog 的基础工具。</small>
+                </div>
+                <button type="button" className="model-test-btn" onClick={copyMcpConfig}>
+                  复制配置
+                </button>
+              </div>
+              <div className="setting-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings.mcpEnabled}
+                  onChange={(event) => {
+                    setSettings((prev) => ({ ...prev, mcpEnabled: event.target.checked }));
+                    setMcpStatus({
+                      status: 'success',
+                      message: event.target.checked
+                        ? '已保存本地 MCP 访问开关。'
+                        : '已关闭本地 MCP 访问。后续 MCP 子进程会直接退出。',
+                    });
+                  }}
+                />
+                <span>允许本地 MCP 访问 Dailog 数据</span>
+              </div>
+              <div className="mcp-config-box" aria-label="MCP 客户端配置">
+                <pre>{getMcpConfigText()}</pre>
+              </div>
+              <small>复制后可粘贴到支持 MCP 的本地 AI 客户端配置中。</small>
+              {mcpStatus.message ? (
+                <div className={`model-test-message ${mcpStatus.status}`} role="status">
+                  {mcpStatus.message}
+                </div>
+              ) : null}
+            </section>
             <label className="setting-field">
               <span>日报生成时间</span>
               <small>软件运行期间，到达该时间会尝试生成当天日报。</small>
@@ -2574,8 +3010,14 @@ export default function App() {
     const rangeSpan = detail.rangeStart && detail.rangeEnd ? `${formatDateLabel(detail.rangeStart)} - ${formatDateLabel(detail.rangeEnd)}` : '';
 
     return (
-      <div className="modal-backdrop" onClick={() => setDetail(null)}>
-        <section className={`detail-modal ${isRangeDetail ? 'is-range' : ''}`} onClick={(event) => event.stopPropagation()}>
+      <div className="modal-backdrop" onClick={closeDetail}>
+        <section
+          className={`detail-modal ${isRangeDetail ? 'is-range' : ''}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            setActiveDetailSubtaskId(null);
+          }}
+        >
           <header className="detail-top">
             <div>
               <h2>{isRangeDetail ? rangeTitle : formatDateLabel(detail.date)}</h2>
@@ -2583,13 +3025,20 @@ export default function App() {
             </div>
             <div className="manager-actions">
               {detail.mode === 'browse' ? (
-                <TextButton tone="dark" onClick={() => setDetail((prev) => ({ ...prev, mode: 'edit' }))}>
+                <TextButton
+                  tone="dark"
+                  onClick={() => {
+                    setExpandedDetailItemId(null);
+                    setActiveDetailSubtaskId(null);
+                    setDetail((prev) => ({ ...prev, mode: 'edit' }));
+                  }}
+                >
                   编辑
                 </TextButton>
               ) : (
                 <TextButton tone="dark" onClick={saveDetail}>保存</TextButton>
               )}
-              <TextButton onClick={() => setDetail(null)}>关闭</TextButton>
+              <TextButton onClick={closeDetail}>关闭</TextButton>
             </div>
           </header>
 
@@ -2601,23 +3050,110 @@ export default function App() {
                     <strong>事项</strong>
                   </div>
 
-                  {(detail.mode === 'browse' ? detailDay?.items ?? [] : detail.draftItems).map((item) =>
-                    detail.mode === 'browse' ? (
-                      <div className="detail-task" key={item.id}>
-                        <p>{item.text}</p>
+                  {(detail.mode === 'browse' ? sortItemsByStatus(detailDay?.items ?? []) : detail.draftItems).map((item) => {
+                    const isExpanded = expandedDetailItemId === item.id;
+                    const displaySubtasks = normalizeSubtasks(item.subtasks);
+                    const draftSubtasks = Array.isArray(item.subtasks) ? item.subtasks : [];
+
+                    return detail.mode === 'browse' ? (
+                      <div
+                        className={`detail-task ${isExpanded ? 'is-expanded' : ''}`}
+                        key={item.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setExpandedDetailItemId((prev) => (prev === item.id ? null : item.id))}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            setExpandedDetailItemId((prev) => (prev === item.id ? null : item.id));
+                          }
+                        }}
+                      >
+                        <div className="detail-task-content">
+                          <p title={item.text}>{item.text}</p>
+                        </div>
                         <StatusIcons value={item.status} />
+                        {isExpanded && displaySubtasks.length ? (
+                          <ul className="detail-subtask-list">
+                            {displaySubtasks.map((subtask) => (
+                              <li key={subtask.id}>{subtask.text}</li>
+                            ))}
+                          </ul>
+                        ) : null}
                       </div>
                     ) : (
-                      <div className="detail-edit-row" key={item.id}>
-                        <input
-                          value={item.text}
-                          placeholder="输入事项"
-                          onChange={(event) => updateDetailItem(item.id, { text: event.target.value })}
-                        />
+                      <div
+                        className={`detail-edit-row ${isExpanded ? 'is-expanded' : ''}`}
+                        key={item.id}
+                        onClick={() => {
+                          setExpandedDetailItemId(item.id);
+                          setActiveDetailSubtaskId(null);
+                        }}
+                      >
+                        <div className="detail-edit-content">
+                        {isExpanded ? (
+                          <AutoResizeTextarea
+                            autoFocus
+                            value={item.text}
+                            placeholder="输入事项"
+                            onChange={(event) => updateDetailItem(item.id, { text: event.target.value })}
+                          />
+                        ) : (
+                          <input
+                            value={item.text}
+                            placeholder="输入事项"
+                            onFocus={() => setExpandedDetailItemId(item.id)}
+                            onChange={(event) => updateDetailItem(item.id, { text: event.target.value })}
+                          />
+                        )}
+                          {isExpanded ? (
+                            <div className="detail-subtask-editor" onClick={(event) => event.stopPropagation()}>
+                              <div className="detail-subtask-editor-head">
+                                <span>进展</span>
+                                <button type="button" onClick={() => addDetailSubtask(item.id)}>
+                                  新增进展
+                                </button>
+                              </div>
+                              {draftSubtasks.length ? (
+                                <div className="detail-subtask-edit-list">
+                                  {draftSubtasks.map((subtask, index) => (
+                                    <div
+                                      className={`detail-subtask-edit-row ${activeDetailSubtaskId === subtask.id ? 'is-active' : ''}`}
+                                      key={subtask.id}
+                                    >
+                                      <span>{index + 1}</span>
+                                      {activeDetailSubtaskId === subtask.id ? (
+                                        <AutoResizeTextarea
+                                          autoFocus
+                                          value={subtask.text}
+                                          placeholder="记录这件事的推进情况"
+                                          onBlur={() => window.setTimeout(() => setActiveDetailSubtaskId(null), 0)}
+                                          onChange={(event) => updateDetailSubtask(item.id, subtask.id, event.target.value)}
+                                        />
+                                      ) : (
+                                        <button
+                                          className="detail-subtask-compact"
+                                          type="button"
+                                          title={subtask.text || '记录这件事的推进情况'}
+                                          onClick={() => setActiveDetailSubtaskId(subtask.id)}
+                                        >
+                                          {subtask.text || '记录这件事的推进情况'}
+                                        </button>
+                                      )}
+                                      <button type="button" onClick={() => removeDetailSubtask(item.id, subtask.id)}>
+                                        删除
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
                         <StatusButtons value={item.status} onChange={(status) => updateDetailItem(item.id, { status })} />
                       </div>
-                    ),
-                  )}
+                    );
+                  })}
                 </section>
 
                 <section className="detail-block">
@@ -2700,3 +3236,4 @@ export default function App() {
     );
   }
 }
+

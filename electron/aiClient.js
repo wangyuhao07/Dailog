@@ -161,6 +161,50 @@ function normalizeConfig(config) {
   }
 }
 
+function extractChoiceContent(choice) {
+  const content = choice?.message?.content ?? choice?.text;
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') {
+          return part;
+        }
+        if (typeof part?.text === 'string') {
+          return part.text;
+        }
+        if (typeof part?.content === 'string') {
+          return part.content;
+        }
+        return '';
+      })
+      .join('');
+  }
+
+  return null;
+}
+
+function emptyContentMessage(choice) {
+  const finishReason = choice?.finish_reason ? `（finish_reason：${choice.finish_reason}）` : '';
+  return `模型返回了空内容${finishReason}。请检查模型名称是否支持 Chat Completions，或在“对话测试”里用同一配置发送一条普通问题。`;
+}
+
+function withProviderOptions(body, { endpoint, model }) {
+  const isDeepSeek = /(^|\.)deepseek\.com/i.test(endpoint) || /^deepseek-/i.test(model);
+  if (!isDeepSeek) {
+    return body;
+  }
+
+  return {
+    ...body,
+    thinking: { type: 'disabled' },
+    reasoning_effort: 'none',
+  };
+}
+
 async function requestChatCompletion(config, { messages, maxTokens, temperature, timeoutMs = 30000 }) {
   const normalized = normalizeConfig(config);
   if (normalized.error) {
@@ -178,13 +222,18 @@ async function requestChatCompletion(config, { messages, maxTokens, temperature,
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model,
-        messages,
-        max_tokens: maxTokens,
-        temperature,
-        stream: false,
-      }),
+      body: JSON.stringify(
+        withProviderOptions(
+          {
+            model,
+            messages,
+            max_tokens: maxTokens,
+            temperature,
+            stream: false,
+          },
+          normalized,
+        ),
+      ),
       signal: controller.signal,
     });
 
@@ -199,7 +248,7 @@ async function requestChatCompletion(config, { messages, maxTokens, temperature,
     }
 
     const firstChoice = payload.json?.choices?.[0];
-    const content = firstChoice?.message?.content ?? firstChoice?.text;
+    const content = extractChoiceContent(firstChoice);
     if (typeof content !== 'string') {
       return {
         ok: false,
@@ -207,9 +256,17 @@ async function requestChatCompletion(config, { messages, maxTokens, temperature,
       };
     }
 
+    const trimmedContent = content.trim();
+    if (!trimmedContent) {
+      return {
+        ok: false,
+        message: emptyContentMessage(firstChoice),
+      };
+    }
+
     return {
       ok: true,
-      content: content.trim(),
+      content: trimmedContent,
       url,
     };
   } catch (error) {
@@ -230,7 +287,7 @@ export async function testModelConnection(config) {
         content: '请只回复 OK，用于测试模型连通性。',
       },
     ],
-    maxTokens: 8,
+    maxTokens: 16,
     temperature: 0,
     timeoutMs: 15000,
   });
@@ -269,7 +326,7 @@ export async function askModelQuestion(config, question = '你是什么模型？
 
   return {
     ok: true,
-    message: result.content || '模型返回了空内容。',
+    message: result.content,
   };
 }
 
@@ -295,6 +352,6 @@ export async function generateDailyReport(config, prompt) {
 
   return {
     ok: true,
-    message: result.content || '模型返回了空内容。',
+    message: result.content,
   };
 }
